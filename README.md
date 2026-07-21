@@ -15,7 +15,7 @@
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows-4B5563">
 </p>
 
-[立即下载](https://agent.terln.cn/) · [官方网站](https://agent.terln.cn/) · [推广返佣](https://agent.terln.cn/partner) · [问题反馈](https://github.com/xiaolinbenben/gpt-zhushou/issues)
+[立即下载](https://agent.terln.cn/#download) · [官方网站](https://agent.terln.cn/) · [推广返佣](https://agent.terln.cn/partner) · [问题反馈](https://github.com/xiaolinbenben/gpt-zhushou/issues)
 
 </div>
 
