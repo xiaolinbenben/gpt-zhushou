@@ -68,6 +68,14 @@ ChatGPT 助手是由 **Terln AI** 打造的 ChatGPT / Codex 桌面管理工具�
   <img src="./docs/images/codex-engine.png" alt="ChatGPT 助手 Codex 引擎配置界面" width="960">
 </p>
 
+### 主题与宠物
+
+为 ChatGPT 设置主题和宠物，陪伴日常办公。
+
+<p align="center">
+  <img src="./docs/images/decorate.png" alt="ChatGPT 助手装饰界面" width="960">
+</p>
+
 ## 三步开始
 
 1. 前往[官方网站](https://agent.terln.cn/)，下载与你电脑匹配的安装包。
