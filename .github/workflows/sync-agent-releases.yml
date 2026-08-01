@@ -23,6 +23,7 @@ jobs:
         env:
           MANIFEST_URL: https://agent.terln.cn/api/releases/stable
           PRODUCT_KEY: terln-ai-client
+          RELEASE_NAME_PREFIX: gptzhushou-client
           TARGET_PLATFORMS: macos-arm64,windows-x64
         with:
           script: |
@@ -34,6 +35,7 @@ jobs:
             const repo = context.repo.repo;
             const manifestUrl = process.env.MANIFEST_URL;
             const productKey = process.env.PRODUCT_KEY;
+            const releaseNamePrefix = process.env.RELEASE_NAME_PREFIX;
             const targetPlatforms = process.env.TARGET_PLATFORMS
               .split(",")
               .map((item) => item.trim())
@@ -147,13 +149,13 @@ jobs:
             const versions = [...new Set(selected.map((item) => item.version))];
             const versionLabel = versions.length === 1 ? versions[0] : versions.join("-");
             const shortKey = crypto.createHash("sha256").update(syncKey).digest("hex").slice(0, 8);
-            let tagName = `${productKey}-v${versionLabel}`;
+            let tagName = `${releaseNamePrefix}-v${versionLabel}`;
 
             if (await tagExists(tagName)) {
               tagName = `${tagName}-${shortKey}`;
             }
 
-            const releaseName = `${productKey} ${versionLabel}`;
+            const releaseName = `${releaseNamePrefix} ${versionLabel}`;
             const releaseBody = [
               `Automated sync from ${manifestUrl}.`,
               "",
