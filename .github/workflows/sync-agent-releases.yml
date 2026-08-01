@@ -49,22 +49,42 @@ jobs:
               return response.json();
             }
 
+            function sleep(ms) {
+              return new Promise((resolve) => setTimeout(resolve, ms));
+            }
+
             async function downloadFile(url, outputPath, expectedMd5) {
-              const response = await fetch(url, {
-                headers: { "user-agent": "github-actions-terln-release-sync" },
-              });
-              if (!response.ok) {
-                throw new Error(`Failed to download ${url}: HTTP ${response.status}`);
+              const maxAttempts = 5;
+              let lastError;
+
+              for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                try {
+                  const response = await fetch(url, {
+                    headers: { "user-agent": "github-actions-terln-release-sync" },
+                  });
+                  if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                  }
+
+                  const buffer = Buffer.from(await response.arrayBuffer());
+                  const actualMd5 = crypto.createHash("md5").update(buffer).digest("hex");
+                  if (expectedMd5 && actualMd5.toLowerCase() !== expectedMd5.toLowerCase()) {
+                    throw new Error(`MD5 mismatch: expected ${expectedMd5}, got ${actualMd5}`);
+                  }
+
+                  await fs.writeFile(outputPath, buffer);
+                  return { size: buffer.length, md5: actualMd5 };
+                } catch (error) {
+                  lastError = error;
+                  if (attempt === maxAttempts) break;
+
+                  const delayMs = attempt * 10_000;
+                  core.warning(`Download attempt ${attempt}/${maxAttempts} failed for ${url}: ${error.message}. Retrying in ${delayMs / 1000}s.`);
+                  await sleep(delayMs);
+                }
               }
 
-              const buffer = Buffer.from(await response.arrayBuffer());
-              const actualMd5 = crypto.createHash("md5").update(buffer).digest("hex");
-              if (expectedMd5 && actualMd5.toLowerCase() !== expectedMd5.toLowerCase()) {
-                throw new Error(`MD5 mismatch for ${url}: expected ${expectedMd5}, got ${actualMd5}`);
-              }
-
-              await fs.writeFile(outputPath, buffer);
-              return { size: buffer.length, md5: actualMd5 };
+              throw new Error(`Failed to download ${url} after ${maxAttempts} attempts: ${lastError.message}`);
             }
 
             function filenameFromUrl(url, platform) {
@@ -147,16 +167,6 @@ jobs:
               "",
             ].join("\n");
 
-            const release = await github.rest.repos.createRelease({
-              owner,
-              repo,
-              tag_name: tagName,
-              name: releaseName,
-              body: releaseBody,
-              draft: false,
-              prerelease: false,
-            });
-
             const outputDir = path.join(process.env.RUNNER_TEMP, "terln-agent-installers");
             await fs.mkdir(outputDir, { recursive: true });
 
@@ -167,6 +177,8 @@ jobs:
               sync_key: syncKey,
               artifacts: [],
             };
+
+            const downloadedArtifacts = [];
 
             for (const artifact of selected) {
               const filename = filenameFromUrl(artifact.download_url, artifact.platform);
@@ -184,24 +196,44 @@ jobs:
                 asset_name: filename,
               });
 
-              await github.rest.repos.uploadReleaseAsset({
-                owner,
-                repo,
-                release_id: release.data.id,
-                name: filename,
-                data: await fs.readFile(outputPath),
-                headers: {
-                  "content-type": "application/octet-stream",
-                  "content-length": downloaded.size,
-                },
+              downloadedArtifacts.push({
+                filename,
+                outputPath,
+                size: downloaded.size,
               });
 
-              core.notice(`Uploaded ${filename}`);
+              core.notice(`Downloaded ${filename}`);
             }
 
             const manifestPath = path.join(outputDir, "manifest.json");
             const manifestBuffer = Buffer.from(JSON.stringify(uploadManifest, null, 2));
             await fs.writeFile(manifestPath, manifestBuffer);
+
+            const release = await github.rest.repos.createRelease({
+              owner,
+              repo,
+              tag_name: tagName,
+              name: releaseName,
+              body: releaseBody,
+              draft: false,
+              prerelease: false,
+            });
+
+            for (const artifact of downloadedArtifacts) {
+              await github.rest.repos.uploadReleaseAsset({
+                owner,
+                repo,
+                release_id: release.data.id,
+                name: artifact.filename,
+                data: await fs.readFile(artifact.outputPath),
+                headers: {
+                  "content-type": "application/octet-stream",
+                  "content-length": artifact.size,
+                },
+              });
+
+              core.notice(`Uploaded ${artifact.filename}`);
+            }
 
             await github.rest.repos.uploadReleaseAsset({
               owner,
