@@ -1,0 +1,218 @@
+name: Sync Terln Agent Releases
+
+on:
+  schedule:
+    - cron: "0 */3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-terln-agent-releases
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Check and upload installers
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Sync terln-ai-client installers
+        uses: actions/github-script@v7
+        env:
+          MANIFEST_URL: https://agent.terln.cn/api/releases/stable
+          PRODUCT_KEY: terln-ai-client
+          TARGET_PLATFORMS: macos-arm64,windows-x64
+        with:
+          script: |
+            const fs = require("node:fs/promises");
+            const path = require("node:path");
+            const crypto = require("node:crypto");
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const manifestUrl = process.env.MANIFEST_URL;
+            const productKey = process.env.PRODUCT_KEY;
+            const targetPlatforms = process.env.TARGET_PLATFORMS
+              .split(",")
+              .map((item) => item.trim())
+              .filter(Boolean);
+
+            async function fetchJson(url) {
+              const response = await fetch(url, {
+                headers: { "user-agent": "github-actions-terln-release-sync" },
+              });
+              if (!response.ok) {
+                throw new Error(`Failed to fetch ${url}: HTTP ${response.status}`);
+              }
+              return response.json();
+            }
+
+            async function downloadFile(url, outputPath, expectedMd5) {
+              const response = await fetch(url, {
+                headers: { "user-agent": "github-actions-terln-release-sync" },
+              });
+              if (!response.ok) {
+                throw new Error(`Failed to download ${url}: HTTP ${response.status}`);
+              }
+
+              const buffer = Buffer.from(await response.arrayBuffer());
+              const actualMd5 = crypto.createHash("md5").update(buffer).digest("hex");
+              if (expectedMd5 && actualMd5.toLowerCase() !== expectedMd5.toLowerCase()) {
+                throw new Error(`MD5 mismatch for ${url}: expected ${expectedMd5}, got ${actualMd5}`);
+              }
+
+              await fs.writeFile(outputPath, buffer);
+              return { size: buffer.length, md5: actualMd5 };
+            }
+
+            function filenameFromUrl(url, platform) {
+              const parsed = new URL(url);
+              const base = path.basename(parsed.pathname);
+              return base || `${productKey}-${platform}`;
+            }
+
+            async function releaseExistsForKey(syncKey) {
+              const releases = await github.paginate(github.rest.repos.listReleases, {
+                owner,
+                repo,
+                per_page: 100,
+              });
+
+              return releases.find((release) =>
+                release.body?.includes(`sync-key: ${syncKey}`)
+              );
+            }
+
+            async function tagExists(tag) {
+              try {
+                await github.rest.git.getRef({
+                  owner,
+                  repo,
+                  ref: `tags/${tag}`,
+                });
+                return true;
+              } catch (error) {
+                if (error.status === 404) return false;
+                throw error;
+              }
+            }
+
+            const manifest = await fetchJson(manifestUrl);
+            const artifacts = manifest.artifacts?.[productKey];
+            if (!Array.isArray(artifacts)) {
+              throw new Error(`Product not found in manifest: ${productKey}`);
+            }
+
+            const selected = targetPlatforms.map((platform) => {
+              const artifact = artifacts.find((item) => item.platform === platform);
+              if (!artifact?.download_url || !artifact?.version || !artifact?.md5) {
+                throw new Error(`Missing release data for ${productKey}/${platform}`);
+              }
+              return artifact;
+            });
+
+            const syncKey = selected
+              .map((item) => `${item.platform}:${item.version}:${item.md5}`)
+              .sort()
+              .join("|");
+
+            const existingRelease = await releaseExistsForKey(syncKey);
+            if (existingRelease) {
+              core.notice(`No update: ${productKey} installers already uploaded to ${existingRelease.html_url}`);
+              return;
+            }
+
+            const versions = [...new Set(selected.map((item) => item.version))];
+            const versionLabel = versions.length === 1 ? versions[0] : versions.join("-");
+            const shortKey = crypto.createHash("sha256").update(syncKey).digest("hex").slice(0, 8);
+            let tagName = `${productKey}-v${versionLabel}`;
+
+            if (await tagExists(tagName)) {
+              tagName = `${tagName}-${shortKey}`;
+            }
+
+            const releaseName = `${productKey} ${versionLabel}`;
+            const releaseBody = [
+              `Automated sync from ${manifestUrl}.`,
+              "",
+              `sync-key: ${syncKey}`,
+              "",
+              "| Platform | Version | MD5 | Size | Source |",
+              "| --- | --- | --- | ---: | --- |",
+              ...selected.map((item) =>
+                `| ${item.platform} | ${item.version} | ${item.md5} | ${item.size_bytes ?? ""} | ${item.download_url} |`
+              ),
+              "",
+            ].join("\n");
+
+            const release = await github.rest.repos.createRelease({
+              owner,
+              repo,
+              tag_name: tagName,
+              name: releaseName,
+              body: releaseBody,
+              draft: false,
+              prerelease: false,
+            });
+
+            const outputDir = path.join(process.env.RUNNER_TEMP, "terln-agent-installers");
+            await fs.mkdir(outputDir, { recursive: true });
+
+            const uploadManifest = {
+              source_manifest_url: manifestUrl,
+              product_key: productKey,
+              synced_at: new Date().toISOString(),
+              sync_key: syncKey,
+              artifacts: [],
+            };
+
+            for (const artifact of selected) {
+              const filename = filenameFromUrl(artifact.download_url, artifact.platform);
+              const outputPath = path.join(outputDir, filename);
+              const downloaded = await downloadFile(artifact.download_url, outputPath, artifact.md5);
+
+              uploadManifest.artifacts.push({
+                platform: artifact.platform,
+                version: artifact.version,
+                download_url: artifact.download_url,
+                md5: downloaded.md5,
+                size_bytes: downloaded.size,
+                released_at: artifact.released_at,
+                notes: artifact.notes,
+                asset_name: filename,
+              });
+
+              await github.rest.repos.uploadReleaseAsset({
+                owner,
+                repo,
+                release_id: release.data.id,
+                name: filename,
+                data: await fs.readFile(outputPath),
+                headers: {
+                  "content-type": "application/octet-stream",
+                  "content-length": downloaded.size,
+                },
+              });
+
+              core.notice(`Uploaded ${filename}`);
+            }
+
+            const manifestPath = path.join(outputDir, "manifest.json");
+            const manifestBuffer = Buffer.from(JSON.stringify(uploadManifest, null, 2));
+            await fs.writeFile(manifestPath, manifestBuffer);
+
+            await github.rest.repos.uploadReleaseAsset({
+              owner,
+              repo,
+              release_id: release.data.id,
+              name: "manifest.json",
+              data: manifestBuffer,
+              headers: {
+                "content-type": "application/json",
+                "content-length": manifestBuffer.length,
+              },
+            });
+
+            core.notice(`Created release ${release.data.html_url}`);
